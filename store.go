@@ -8,30 +8,52 @@ import (
 	"sync"
 )
 
+// URLStore 结构体
 type URLStore struct {
 	urls map[string]string
 	mu   sync.RWMutex
-	file *os.File
+	save chan record
 }
 
+// record 存储结构体
 type record struct {
 	Key, URL string
 }
 
-func NewURLStore(filename string) *URLStore {
-	s := &URLStore{urls: make(map[string]string)}
-	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		log.Fatal("Error opening URLStore", err)
-	}
-	s.file = f
+var saveQueueLength = 1000
 
-	if err := s.load(); err != nil {
-		log.Println("Error loading data in URLStore", err)
+// NewURLStore 工厂函数
+func NewURLStore(filename string) *URLStore {
+	s := &URLStore{
+		urls: make(map[string]string),
+		save: make(chan record, saveQueueLength)}
+
+	if err := s.load(filename); err != nil {
+		log.Println("Error loading URLStore", err)
 	}
+
+	go s.saveLoop(filename)
 	return s
 }
 
+func (s *URLStore) saveLoop(filename string) {
+	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		log.Fatal("URLStore:", err)
+	}
+	defer f.Close()
+
+	e := gob.NewEncoder(f)
+
+	for {
+		r := <-s.save
+		if err := e.Encode(r); err != nil {
+			log.Println("URLStore:", err)
+		}
+	}
+}
+
+// Get 获取长链接方法
 func (s *URLStore) Get(key string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -39,6 +61,7 @@ func (s *URLStore) Get(key string) string {
 	return s.urls[key]
 }
 
+// Set 设置长链接方法
 func (s *URLStore) Set(key, url string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -51,19 +74,19 @@ func (s *URLStore) Set(key, url string) bool {
 	return true
 }
 
+// Count 链接个数
 func (s *URLStore) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.urls)
 }
 
+// Put 执行存储
 func (s *URLStore) Put(url string) string {
 	for {
 		key := genKey(s.Count())
 		if s.Set(key, url) {
-			if err := s.save(key, url); err != nil {
-				log.Println("Error saving to URLStore:", err)
-			}
+			s.save <- record{key, url}
 			return key
 		}
 	}
@@ -71,18 +94,17 @@ func (s *URLStore) Put(url string) string {
 	panic("shouldn’t get here")
 }
 
-func (s *URLStore) save(key, url string) error {
-	e := gob.NewEncoder(s.file)
-	return e.Encode(record{key, url})
-}
+func (s *URLStore) load(filename string) error {
+	f, err := os.Open(filename)
 
-func (s *URLStore) load() error {
-	if _, err := s.file.Seek(0, 0); err != nil {
+	if err != nil {
+		log.Println("Error opening URLStore", err)
 		return err
 	}
 
-	d := gob.NewDecoder(s.file)
-	var err error
+	defer f.Close()
+
+	d := gob.NewDecoder(f)
 	for err == nil {
 		var r record
 		if err = d.Decode(&r); err == nil {
@@ -94,5 +116,6 @@ func (s *URLStore) load() error {
 		return nil
 	}
 
+	log.Println("Error decoding URLStore:", err)
 	return err
 }

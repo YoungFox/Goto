@@ -1,10 +1,18 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 )
 
+var (
+	listenAddr = flag.String("http", ":8888", "http listen address")
+	dataFile   = flag.String("file", "store.gob", "data store file name")
+	hostname   = flag.String("host", "localhost:8888", "http host name")
+)
+
+// AddForm 页面HTML
 const AddForm = `
 	<form method="POST" action="/add">
 	URL: <input type="text" name="url">
@@ -12,14 +20,18 @@ const AddForm = `
 	</form>
 `
 
-var store = NewURLStore("store.gob")
+var store *URLStore
 
 func main() {
+	flag.Parse()
+	store = NewURLStore(*dataFile)
+
 	http.HandleFunc("/", Redirect)
 	http.HandleFunc("/add", Add)
-	http.ListenAndServe(":8888", nil)
+	http.ListenAndServe(*listenAddr, nil)
 }
 
+// Redirect 短连接重定向
 func Redirect(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[1:]
 	url := store.Get(key)
@@ -32,6 +44,7 @@ func Redirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
+// Add 新增长连接
 func Add(w http.ResponseWriter, r *http.Request) {
 	url := r.FormValue("url")
 	if url == "" {
@@ -41,5 +54,5 @@ func Add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := store.Put(url)
-	fmt.Fprintf(w, "http://localhost:8888/%s", key)
+	fmt.Fprintf(w, "http://%s/%s", *hostname, key)
 }
