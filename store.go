@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"net/rpc"
 	"os"
 	"sync"
 )
@@ -13,6 +15,11 @@ type URLStore struct {
 	urls map[string]string
 	mu   sync.RWMutex
 	save chan record
+}
+
+type ProxyStore struct {
+	urls   *URLStore
+	client *rpc.Client
 }
 
 // record 存储结构体
@@ -26,14 +33,46 @@ var saveQueueLength = 1000
 func NewURLStore(filename string) *URLStore {
 	s := &URLStore{
 		urls: make(map[string]string),
-		save: make(chan record, saveQueueLength)}
-
-	if err := s.load(filename); err != nil {
-		log.Println("Error loading URLStore", err)
 	}
 
-	go s.saveLoop(filename)
+	if filename != "" {
+		s.save = make(chan record, saveQueueLength)
+		if err := s.load(filename); err != nil {
+			log.Println("Error loading URLStore:", err)
+		}
+		go s.saveLoop(filename)
+	}
 	return s
+}
+
+func NewProxyStore(addr string) *ProxyStore {
+	client, err := rpc.DialHTTP("tcp", addr)
+
+	if err != nil {
+		log.Printf("Error constructing ProxyStore", err)
+	}
+
+	return &ProxyStore{urls: NewURLStore(""), client: client}
+}
+
+func (s *ProxyStore) Get(key, url *string) error {
+	if err := s.urls.Get(key, url); err == nil {
+		return nil
+	}
+	if err := s.client.Call("Store.Get", key, url); err != nil {
+		return err
+	}
+	s.urls.Set(key, url)
+	return nil
+}
+
+func (s *ProxyStore) Put(url, key *string) error {
+	if err := s.client.Call("Store.Put", url, key); err != nil {
+		return err
+	}
+
+	s.urls.Set(key, url)
+	return nil
 }
 
 func (s *URLStore) saveLoop(filename string) {
@@ -54,24 +93,29 @@ func (s *URLStore) saveLoop(filename string) {
 }
 
 // Get 获取长链接方法
-func (s *URLStore) Get(key string) string {
+func (s *URLStore) Get(key, url *string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.urls[key]
+	if u, ok := s.urls[*key]; ok {
+		*url = u
+		return nil
+	}
+
+	return errors.New("key not found")
 }
 
 // Set 设置长链接方法
-func (s *URLStore) Set(key, url string) bool {
+func (s *URLStore) Set(key, url *string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, present := s.urls[key]; present {
-		return false
+	if _, present := s.urls[*key]; present {
+		return errors.New("key already exists")
 	}
 
-	s.urls[key] = url
+	s.urls[*key] = *url
 
-	return true
+	return nil
 }
 
 // Count 链接个数
@@ -82,16 +126,17 @@ func (s *URLStore) Count() int {
 }
 
 // Put 执行存储
-func (s *URLStore) Put(url string) string {
+func (s *URLStore) Put(url, key *string) error {
 	for {
-		key := genKey(s.Count())
-		if s.Set(key, url) {
-			s.save <- record{key, url}
-			return key
+		*key = genKey(s.Count())
+		if err := s.Set(key, url); err == nil {
+			break
 		}
 	}
-	// 不可执行到这
-	panic("shouldn’t get here")
+	if s.save != nil {
+		s.save <- record{*key, *url}
+	}
+	return nil
 }
 
 func (s *URLStore) load(filename string) error {
@@ -108,7 +153,7 @@ func (s *URLStore) load(filename string) error {
 	for err == nil {
 		var r record
 		if err = d.Decode(&r); err == nil {
-			s.Set(r.Key, r.URL)
+			s.Set(&r.Key, &r.URL)
 		}
 	}
 

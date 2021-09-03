@@ -4,12 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/rpc"
 )
 
 var (
-	listenAddr = flag.String("http", ":8888", "http listen address")
+	listenAddr = flag.String("http", ":8080", "http listen address")
 	dataFile   = flag.String("file", "store.json", "data store file name")
-	hostname   = flag.String("host", "localhost:8888", "http host name")
+	hostname   = flag.String("host", "localhost:8080", "http host name")
+	rpcEnabled = flag.Bool("rpc", false, "enable RPC server")
+	masterAddr = flag.String("master", "", "RPC master address")
 )
 
 // AddForm 页面HTML
@@ -20,11 +23,25 @@ const AddForm = `
 	</form>
 `
 
-var store *URLStore
+type Store interface {
+	Put(url, key *string) error
+	Get(key, url *string) error
+}
+
+var store Store
 
 func main() {
 	flag.Parse()
-	store = NewURLStore(*dataFile)
+	if *masterAddr != "" {
+		store = NewProxyStore(*masterAddr)
+	} else {
+		store = NewURLStore(*dataFile)
+	}
+
+	if *rpcEnabled {
+		rpc.RegisterName("Store", store)
+		rpc.HandleHTTP()
+	}
 
 	http.HandleFunc("/", Redirect)
 	http.HandleFunc("/add", Add)
@@ -34,10 +51,9 @@ func main() {
 // Redirect 短连接重定向
 func Redirect(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[1:]
-	url := store.Get(key)
-
-	if url == "" {
-		http.NotFound(w, r)
+	var url string
+	if err := store.Get(&key, &url); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -53,6 +69,11 @@ func Add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := store.Put(url)
+	var key string
+
+	if err := store.Put(&url, &key); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	fmt.Fprintf(w, "http://%s/%s", *hostname, key)
 }
